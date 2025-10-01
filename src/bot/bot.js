@@ -48,7 +48,6 @@ class TelegramBot {
                 
                 // Проверяем, инициализирован ли бот
                 if (!this.isInitialized) {
-                    console.log('⚠️ Бот еще не инициализирован');
                     return;
                 }
 
@@ -322,7 +321,6 @@ class TelegramBot {
     async start() {
         try {
             await this.bot.launch();
-            console.log('🚀 Telegram бот запущен!');
             
             // Graceful stop для различных сигналов
             process.once('SIGINT', () => this.stop('SIGINT'));
@@ -354,8 +352,6 @@ class TelegramBot {
             
             // Закрываем соединение с базой данных
             await this.userManager.close();
-            
-            console.log('✅ Бот корректно остановлен');
             
             // Для nodemon не выходим из процесса
             if (signal === 'SIGUSR2') {

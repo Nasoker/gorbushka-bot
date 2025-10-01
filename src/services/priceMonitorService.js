@@ -1,0 +1,344 @@
+const AuthService = require('./authService');
+
+/**
+ * Сервис для мониторинга изменений в прайс-листах
+ */
+class PriceMonitorService {
+    constructor(database, authService, bot) {
+        this.database = database;
+        this.authService = authService;
+        this.bot = bot;
+        this.isRunning = false;
+        this.intervalId = null;
+    }
+
+    /**
+     * Запуск мониторинга (каждый час)
+     */
+    start() {
+        if (this.isRunning) {
+            return;
+        }
+
+        this.isRunning = true;
+
+        this.checkForChanges();
+
+        this.intervalId = setInterval(() => {
+            this.checkForChanges();
+        }, 60 * 5 * 1000);
+    }
+
+    /**
+     * Проверка изменений в прайс-листах
+     */
+    async checkForChanges() {
+        const startTime = Date.now();
+        try {
+            console.log(`🔍 Начало проверки изменений в прайс-листах - ${new Date().toLocaleTimeString('ru-RU')}`);
+
+            // Проверяем, есть ли действительный токен (с проверкой БД)
+            const isValid = await this.authService.isTokenValidWithDBCheck();
+            if (!isValid) {
+                console.log('⚠️ Токен недействителен, попытка авторизации...');
+                const authResult = await this.authService.loginToFimex();
+                if (!authResult.success) {
+                    console.log('❌ Не удалось авторизоваться, пропускаем проверку изменений');
+                    return;
+                }
+            }
+
+            // Получаем все бренды
+            const brands = await this.database.getBrands();
+            if (!brands || brands.length === 0) {
+                console.log('⚠️ Бренды не найдены, пропускаем проверку изменений');
+                return;
+            }
+
+            const allChanges = [];
+
+            // Проверяем каждый бренд
+            for (const brand of brands) {
+                try {
+                    // Получаем текущий прайс-лист
+                    const pricelistResult = await this.authService.fetchPricelist(brand.id);
+                    
+                    if (pricelistResult.success && pricelistResult.products) {
+                        // Получаем старые данные из базы
+                        const oldProducts = await this.database.getProductsByBrand(brand.id);
+                        
+                        // Сравниваем и находим изменения
+                        const changes = this.compareProducts(oldProducts, pricelistResult.products, brand);
+                        
+                        if (changes.length > 0) {
+                            allChanges.push(...changes);
+                        }
+
+                        // Обновляем данные в базе
+                        await this.database.saveProducts(pricelistResult.products, brand.id);
+                    }
+
+                    // Пауза между запросами (200мс чтобы не перегружать API)
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                } catch (error) {
+                    console.error(`❌ Ошибка проверки бренда ${brand.name}:`, error.message);
+                }
+            }
+
+            // Если есть изменения, сохраняем их и отправляем уведомления
+            if (allChanges.length > 0) {
+                await this.saveChanges(allChanges);
+                await this.sendNotifications(allChanges);
+                
+                // Очищаем таблицу изменений после отправки уведомлений
+                await this.database.clearPriceChanges();
+            } else {
+                console.log('✅ Изменений не найдено');
+            }
+
+            const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+            console.log(`✅ Проверка завершена за ${duration} секунд - ${new Date().toLocaleTimeString('ru-RU')}`);
+
+        } catch (error) {
+            console.error('❌ Ошибка проверки изменений:', error.message);
+            const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+            console.log(`❌ Проверка прервана после ${duration} секунд`);
+        }
+    }
+
+    /**
+     * Сравнение старых и новых товаров
+     */
+    compareProducts(oldProducts, newProducts, brand) {
+        const changes = [];
+        const oldProductsMap = new Map();
+        const newProductsMap = new Map();
+
+        // Создаем карты для быстрого поиска
+        oldProducts.forEach(product => {
+            oldProductsMap.set(product.id_product, product);
+        });
+
+        newProducts.forEach(product => {
+            newProductsMap.set(product.id_product, product);
+        });
+
+        // Проверяем изменения в существующих товарах
+        for (const [id, newProduct] of newProductsMap) {
+            const oldProduct = oldProductsMap.get(id);
+            
+            if (oldProduct) {
+                // Товар существует, проверяем изменения
+                if (oldProduct.price !== newProduct.price) {
+                    const changeType = newProduct.price > oldProduct.price ? 'price_increase' : 'price_decrease';
+                    changes.push({
+                        id_product: id,
+                        id_brand: brand.id,
+                        change_type: changeType,
+                        old_price: oldProduct.price,
+                        new_price: newProduct.price,
+                        old_quantity: oldProduct.total_qty,
+                        new_quantity: newProduct.total_qty,
+                        product_name: newProduct.chars_group,
+                        brand_name: brand.name,
+                        country_abbr: newProduct.country_abbr,
+                        old_value: `${oldProduct.price}`,
+                        new_value: `${newProduct.price}`
+                    });
+                }
+
+                if (oldProduct.total_qty !== newProduct.total_qty) {
+                    changes.push({
+                        id_product: id,
+                        id_brand: brand.id,
+                        change_type: 'quantity_changed',
+                        old_price: oldProduct.price,
+                        new_price: newProduct.price,
+                        old_quantity: oldProduct.total_qty,
+                        new_quantity: newProduct.total_qty,
+                        product_name: newProduct.chars_group,
+                        brand_name: brand.name,
+                        country_abbr: newProduct.country_abbr,
+                        old_value: oldProduct.total_qty,
+                        new_value: newProduct.total_qty
+                    });
+                }
+            } else {
+                // Новый товар
+                changes.push({
+                    id_product: id,
+                    id_brand: brand.id,
+                    change_type: 'product_added',
+                    old_price: null,
+                    new_price: newProduct.price,
+                    old_quantity: null,
+                    new_quantity: newProduct.total_qty,
+                    product_name: newProduct.chars_group,
+                    brand_name: brand.name,
+                    country_abbr: newProduct.country_abbr,
+                    old_value: null,
+                    new_value: `${newProduct.price} (${newProduct.total_qty} шт.)`
+                });
+            }
+        }
+
+        // Проверяем удаленные товары
+        for (const [id, oldProduct] of oldProductsMap) {
+            if (!newProductsMap.has(id)) {
+                // Товар удален
+                changes.push({
+                    id_product: id,
+                    id_brand: brand.id,
+                    change_type: 'product_removed',
+                    old_price: oldProduct.price,
+                    new_price: null,
+                    old_quantity: oldProduct.total_qty,
+                    new_quantity: null,
+                    product_name: oldProduct.chars_group,
+                    brand_name: brand.name,
+                    country_abbr: oldProduct.country_abbr,
+                    old_value: `${oldProduct.price} (${oldProduct.total_qty} шт.)`,
+                    new_value: 'Товар удален'
+                });
+            }
+        }
+
+        return changes;
+    }
+
+    /**
+     * Сохранение изменений в базу данных
+     */
+    async saveChanges(changes) {
+        try {
+            for (const change of changes) {
+                await this.database.savePriceChange(change);
+            }
+        } catch (error) {
+            console.error('❌ Ошибка сохранения изменений:', error.message);
+        }
+    }
+
+    /**
+     * Отправка уведомлений администраторам и модераторам
+     */
+    async sendNotifications(changes) {
+        try {
+            if (!this.bot || !this.bot.telegram) {
+                console.log('⚠️ Бот не инициализирован, пропускаем отправку уведомлений');
+                return;
+            }
+
+            const admins = await this.database.getAdminsAndModerators();
+            
+            if (!admins || admins.length === 0) {
+                console.log('⚠️ Администраторы и модераторы не найдены');
+                return;
+            }
+
+            const messages = this.formatChangesMessage(changes);
+
+            for (const admin of admins) {
+                try {
+                    // Отправляем каждое сообщение отдельно
+                    for (const message of messages) {
+                        await this.bot.telegram.sendMessage(admin.user_id, message, { parse_mode: 'HTML' });
+                        // Небольшая пауза между сообщениями
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    console.log(`✅ Уведомления отправлены администратору ${admin.user_id}`);
+                } catch (error) {
+                    console.error(`❌ Ошибка отправки уведомления администратору ${admin.user_id}:`, error.message);
+                }
+            }
+
+        } catch (error) {
+            console.error('❌ Ошибка отправки уведомлений:', error.message);
+        }
+    }
+
+    /**
+     * Конвертация кода страны в emoji флаг
+     */
+    getCountryFlag(countryCode) {
+        if (!countryCode) return '';
+        
+        const codePoints = countryCode
+            .toUpperCase()
+            .split('')
+            .map(char => 127397 + char.charCodeAt(0));
+        
+        return ' ' + String.fromCodePoint(...codePoints);
+    }
+
+    /**
+     * Форматирование сообщения с изменениями (разбивка на части)
+     */
+    formatChangesMessage(changes) {
+        const MAX_MESSAGE_LENGTH = 4000; // Оставляем запас от лимита в 4096
+        const messages = [];
+        
+        const changesByType = {
+            price_increase: [],
+            price_decrease: [],
+            product_added: [],
+            product_removed: [],
+            quantity_changed: []
+        };
+
+        // Группируем изменения по типам
+        changes.forEach(change => {
+            changesByType[change.change_type].push(change);
+        });
+
+        // Заголовок
+        let currentMessage = `📊 <b>Обнаружены изменения в прайс-листах:</b>\n`;
+
+        // Функция для добавления секции
+        const addSection = (title, items, formatter) => {
+            if (items.length === 0) return;
+
+            let section = `${title}\n`;
+            items.forEach(item => {
+                section += formatter(item);
+            });
+
+            // Если текущее сообщение + секция превышают лимит, начинаем новое
+            if (currentMessage.length + section.length > MAX_MESSAGE_LENGTH) {
+                messages.push(currentMessage);
+                currentMessage = section;
+            } else {
+                currentMessage += section;
+            }
+        };
+
+        // Добавляем секции
+        addSection('📈 <b>Повышение цен:</b>\n', changesByType.price_increase, 
+            change => `• ${change.brand_name} - ${change.product_name}${this.getCountryFlag(change.country_abbr)}\n  ${change.old_price} → ${change.new_price} руб.\n\n`
+        );
+
+        addSection('📉 <b>Снижение цен:</b>\n', changesByType.price_decrease,
+            change => `• ${change.brand_name} - ${change.product_name}${this.getCountryFlag(change.country_abbr)}\n  ${change.old_price} → ${change.new_price} руб.\n\n`
+        );
+
+        addSection('➕ <b>Новые товары:</b>\n', changesByType.product_added,
+            change => `• ${change.brand_name} - ${change.product_name}${this.getCountryFlag(change.country_abbr)}\n  ${change.new_price} руб. (${change.new_quantity} шт.)\n\n`
+        );
+
+        addSection('➖ <b>Удаленные товары:</b>\n', changesByType.product_removed,
+            change => `• ${change.brand_name} - ${change.product_name}${this.getCountryFlag(change.country_abbr)}\n  Было: ${change.old_price} руб. (${change.old_quantity} шт.)\n\n`
+        );
+
+        addSection('📦 <b>Изменение количества:</b>\n', changesByType.quantity_changed,
+            change => `• ${change.brand_name} - ${change.product_name}${this.getCountryFlag(change.country_abbr)}\n  ${change.old_quantity} → ${change.new_quantity} шт.\n\n`
+        );
+
+        // Добавляем время к последнему сообщению
+        currentMessage += `\n🕐 <i>Время проверки: ${new Date().toLocaleString('ru-RU')}</i>`;
+        messages.push(currentMessage);
+
+        return messages;
+    }
+}
+
+module.exports = PriceMonitorService;

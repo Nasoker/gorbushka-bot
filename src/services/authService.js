@@ -1,5 +1,6 @@
 const axios = require('axios');
 const Database = require('../database/database');
+require('dotenv').config();
 
 /**
  * Сервис для авторизации на fimex.ae
@@ -9,10 +10,14 @@ class AuthService {
         this.baseUrl = 'https://fimex.ae';
         this.token = null;
         this.tokenExpiry = null;
-        this.login = 'M:413/C';
-        this.password = '1rmbfzr7';
+        this.login = process.env.FIMEX_LOGIN;
+        this.password = process.env.FIMEX_PASSWORD;
         this.database = database;
         this.serviceName = 'fimex_ae';
+        
+        if (!this.login || !this.password) {
+            throw new Error('FIMEX_LOGIN и FIMEX_PASSWORD должны быть установлены в переменных окружения');
+        }
     }
 
     /**
@@ -34,17 +39,29 @@ class AuthService {
         try {
             const tokenData = await this.database.getToken(this.serviceName);
             if (tokenData && tokenData.expires_at) {
-                const expiryDate = new Date(tokenData.expires_at);
+                // Проверяем, является ли expires_at timestamp в миллисекундах
+                let expiryDate;
+                if (typeof tokenData.expires_at === 'number') {
+                    // Если это timestamp в миллисекундах
+                    expiryDate = new Date(tokenData.expires_at);
+                } else if (typeof tokenData.expires_at === 'string') {
+                    // Если это строка, пытаемся распарсить
+                    expiryDate = new Date(tokenData.expires_at);
+                } else {
+                    // Если это уже объект Date
+                    expiryDate = tokenData.expires_at;
+                }
+                
+                
                 if (expiryDate > new Date()) {
                     this.token = tokenData.token;
                     this.tokenExpiry = expiryDate;
-                    console.log('✅ Токен загружен из базы данных');
-                    console.log(`⏰ Токен действителен до: ${this.tokenExpiry.toLocaleString('ru-RU')}`);
                 } else {
-                    console.log('⚠️ Токен в базе данных просрочен');
                     // Удаляем просроченный токен
                     await this.database.deleteToken(this.serviceName);
                 }
+            } else {
+                console.error('ℹ️ Токен в базе данных не найден');
             }
         } catch (error) {
             console.error('❌ Ошибка загрузки токена из базы данных:', error.message);
@@ -59,7 +76,6 @@ class AuthService {
 
         try {
             await this.database.saveToken(this.serviceName, token, expiryDate);
-            console.log('✅ Токен сохранен в базу данных');
         } catch (error) {
             console.error('❌ Ошибка сохранения токена в базу данных:', error.message);
         }
@@ -70,11 +86,34 @@ class AuthService {
      */
     async loginToFimex() {
         try {
-            console.log('🔐 Выполняется авторизация на fimex.ae...');
-            
-            console.log(`${this.baseUrl}/app-api/v1/auth/check-login?login=M:413/C`)
-            // Попробуем разные варианты заголовков для обхода 403
-            const loginResponse = await axios.post(`https://fimex.ae/app-api/v1/auth/login?login=M:413/C&password=1rmbfzr7`, {}, {
+            // Проверяем, есть ли уже действительный токен в базе данных
+            if (this.database) {
+                const existingToken = await this.database.getToken(this.serviceName);
+                if (existingToken && existingToken.expires_at) {
+                    let expiryDate;
+                    if (typeof existingToken.expires_at === 'number') {
+                        expiryDate = new Date(existingToken.expires_at);
+                    } else if (typeof existingToken.expires_at === 'string') {
+                        expiryDate = new Date(existingToken.expires_at);
+                    } else {
+                        expiryDate = existingToken.expires_at;
+                    }
+                    
+                    if (expiryDate > new Date()) {
+                        this.token = existingToken.token;
+                        this.tokenExpiry = expiryDate;
+                        return {
+                            success: true,
+                            token: this.token,
+                            expiry: this.tokenExpiry
+                        };
+                    } else {
+                        await this.database.deleteToken(this.serviceName);
+                    }
+                }
+            }
+
+            const loginResponse = await axios.post(`https://fimex.ae/app-api/v1/auth/login?login=${this.login}&password=${this.password}`, {}, {
                 headers: {
                     'Host': 'fimex.ae',
                     'Content-Type': 'application/json',
@@ -94,21 +133,13 @@ class AuthService {
                 }
             });
 
-            console.log('📊 Статус ответа:', loginResponse.status);
-            console.log('📋 Данные ответа:', loginResponse.data);
-
             if (loginResponse.data && loginResponse.data.token) {
                 this.token = loginResponse.data.token;
                 
                 // Устанавливаем время истечения токена (обычно токены живут 24 часа)
                 this.tokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
                 
-                console.log('✅ Авторизация на fimex.ae успешна');
-                console.log(`🔑 Токен получен: ${this.token.substring(0, 20)}...`);
-                console.log(`⏰ Токен действителен до: ${this.tokenExpiry.toLocaleString('ru-RU')}`);
-                
-                // Сохраняем токен в базу данных
-                await this.saveTokenToDatabase(this.token, this.tokenExpiry);
+                await this.database.saveToken(this.serviceName, this.token, this.tokenExpiry);
                 
                 return {
                     success: true,
@@ -116,35 +147,9 @@ class AuthService {
                     expiry: this.tokenExpiry
                 };
             } else {
-                console.log('⚠️ Токен не найден в ответе, но авторизация может быть успешной');
-                console.log('📋 Полный ответ:', JSON.stringify(loginResponse.data, null, 2));
-                
-                // Если токена нет, но запрос успешен, создаем мок-токен для демонстрации
-                const mockToken = 'fimex_token_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-                this.token = mockToken;
-                this.tokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
-                
-                console.log('✅ Создан мок-токен для демонстрации');
-                console.log(`🔑 Токен: ${this.token.substring(0, 20)}...`);
-                console.log(`⏰ Токен действителен до: ${this.tokenExpiry.toLocaleString('ru-RU')}`);
-                
-                // Сохраняем мок-токен в базу данных
-                await this.saveTokenToDatabase(this.token, this.tokenExpiry);
-                
-                return {
-                    success: true,
-                    token: this.token,
-                    expiry: this.tokenExpiry
-                };
+                console.error('❌ Не удалось получить токен');
             }
-        } catch (error) {
-            console.error(error.response);
-            
-            if (error.response) {
-                console.error('📊 Статус ответа:', error.response.status);
-                console.error('📋 Данные ответа:', error.response.data);
-            }
-            
+        } catch (error) {            
             return {
                 success: false,
                 error: error.message
@@ -153,22 +158,97 @@ class AuthService {
     }
 
     /**
-     * Проверка действительности токена
+     * Проверка действительности токена (синхронная, только память)
      */
     isTokenValid() {
         return this.token && this.tokenExpiry && new Date() < this.tokenExpiry;
     }
 
     /**
+     * Проверка действительности токена (асинхронная, с проверкой БД)
+     */
+    async isTokenValidWithDBCheck() {
+        // Сначала проверяем память
+        if (this.isTokenValid()) {
+            return true;
+        }
+
+        // Если в памяти токена нет или он просрочен, проверяем БД
+        if (this.database) {
+            try {
+                const tokenData = await this.database.getToken(this.serviceName);
+                if (tokenData && tokenData.expires_at) {
+                    let expiryDate;
+                    if (typeof tokenData.expires_at === 'number') {
+                        expiryDate = new Date(tokenData.expires_at);
+                    } else if (typeof tokenData.expires_at === 'string') {
+                        expiryDate = new Date(tokenData.expires_at);
+                    } else {
+                        expiryDate = tokenData.expires_at;
+                    }
+                    
+                    if (expiryDate > new Date()) {
+                        // Обновляем данные в памяти
+                        this.token = tokenData.token;
+                        this.tokenExpiry = expiryDate;
+                        console.log('✅ Токен перезагружен из БД и действителен');
+                        return true;
+                    } else {
+                        console.log('⚠️ Токен в БД просрочен');
+                        await this.database.deleteToken(this.serviceName);
+                        return false;
+                    }
+                }
+            } catch (error) {
+                console.error('❌ Ошибка проверки токена в БД:', error.message);
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Получение токена (с авторизацией если нужно)
      */
     async getToken() {
-        if (!this.isTokenValid()) {
-            console.log('🔄 Токен недействителен или отсутствует, выполняем авторизацию...');
-            const authResult = await this.loginToFimex();
-            if (!authResult.success) {
-                throw new Error(`Не удалось получить токен: ${authResult.error}`);
+        // Сначала проверяем, есть ли токен в памяти
+        if (this.isTokenValid()) {
+            return this.token;
+        }
+
+        // Если токена нет в памяти, проверяем базу данных
+        if (this.database) {
+            try {
+                const tokenData = await this.database.getToken(this.serviceName);
+                if (tokenData && tokenData.expires_at) {
+                    // Проверяем, является ли expires_at timestamp в миллисекундах
+                    let expiryDate;
+                    if (typeof tokenData.expires_at === 'number') {
+                        // Если это timestamp в миллисекундах
+                        expiryDate = new Date(tokenData.expires_at);
+                    } else if (typeof tokenData.expires_at === 'string') {
+                        // Если это строка, пытаемся распарсить
+                        expiryDate = new Date(tokenData.expires_at);
+                    } else {
+                        // Если это уже объект Date
+                        expiryDate = tokenData.expires_at;
+                    }
+                    
+                    if (expiryDate > new Date()) {
+                        this.token = tokenData.token;
+                        this.tokenExpiry = expiryDate;
+                        return this.token;
+                    } else {
+                        await this.database.deleteToken(this.serviceName);
+                    }
+                }
+            } catch (error) {
+                console.error('❌ Ошибка проверки токена в базе данных:', error.message);
             }
+        }
+        const authResult = await this.loginToFimex();
+        if (!authResult.success) {
+            throw new Error(`Не удалось получить токен: ${authResult.error}`);
         }
         return this.token;
     }
@@ -249,13 +329,6 @@ class AuthService {
     }
 
     /**
-     * Получение информации о пользователе
-     */
-    async getUserInfo() {
-        return await this.makeAuthenticatedRequest('GET', '/user/profile');
-    }
-
-    /**
      * Получение статуса токена
      */
     getTokenStatus() {
@@ -265,6 +338,68 @@ class AuthService {
             expiry: this.tokenExpiry,
             timeLeft: this.tokenExpiry ? Math.max(0, this.tokenExpiry - new Date()) : 0
         };
+    }
+
+    /**
+     * Получение списка брендов
+     */
+    async fetchBrands() {
+        try {
+            const result = await this.makeAuthenticatedRequest('GET', '/app-api/v1/catalog/fetch-brands');
+            
+            if (result.success && result.data && result.data.data) {
+                console.log(`✅ Получено ${result.data.data.length} брендов`);
+                return {
+                    success: true,
+                    brands: result.data.data
+                };
+            } else {
+                console.log('⚠️ Бренды не найдены в ответе');
+                return {
+                    success: false,
+                    error: 'Бренды не найдены в ответе'
+                };
+            }
+        } catch (error) {
+            console.error('❌ Ошибка получения брендов:', error.message);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
+    }
+
+    /**
+     * Получение прайс-листа бренда
+     */
+    async fetchPricelist(brandId) {
+        try {
+            const result = await this.makeAuthenticatedRequest('GET', `/app-api/v1/catalog/fetch-pricelist?id_brand=${brandId}`);
+            
+            if (result.success && result.data && result.data.data) {
+                return {
+                    success: true,
+                    products: result.data.data
+                };
+            } else if (result.success && result.data && Array.isArray(result.data)) {
+                // Если данные находятся прямо в result.data
+                return {
+                    success: true,
+                    products: result.data
+                };
+            } else {
+                return {
+                    success: false,
+                    error: 'Товары не найдены в ответе'
+                };
+            }
+        } catch (error) {
+            console.error(`❌ Ошибка получения прайс-листа для бренда ${brandId}:`, error.message);
+            return {
+                success: false,
+                error: error.message
+            };
+        }
     }
 }
 
