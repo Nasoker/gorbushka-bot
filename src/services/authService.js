@@ -268,7 +268,7 @@ class AuthService {
                     'Content-Type': 'application/json',
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 },
-                timeout: 10000
+                timeout: 30000  // Увеличили до 30 секунд
             };
 
             if (data) {
@@ -299,7 +299,7 @@ class AuthService {
                         'Content-Type': 'application/json',
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                     },
-                    timeout: 10000
+                    timeout: 30000  // Увеличили до 30 секунд
                 };
 
                 if (data) {
@@ -390,11 +390,10 @@ class AuthService {
             } else {
                 return {
                     success: false,
-                    error: 'Товары не найдены в ответе'
+                    error: result.error || 'Товары не найдены в ответе'
                 };
             }
         } catch (error) {
-            console.error(`❌ Ошибка получения прайс-листа для бренда ${brandId}:`, error.message);
             return {
                 success: false,
                 error: error.message

@@ -76,6 +76,9 @@ class PriceMonitorService {
 
                         // Обновляем данные в базе
                         await this.database.saveProducts(pricelistResult.products, brand.id);
+                    } else {
+                        // Пропускаем бренд при ошибке (таймаут, нет данных и т.д.)
+                        console.log(`⚠️ Пропускаем бренд ${brand.name}: ${pricelistResult.error}`);
                     }
 
                     // Пауза между запросами (200мс чтобы не перегружать API)
@@ -220,7 +223,7 @@ class PriceMonitorService {
     }
 
     /**
-     * Отправка уведомлений администраторам и модераторам
+     * Отправка уведомлений только модераторам
      */
     async sendNotifications(changes) {
         try {
@@ -229,26 +232,34 @@ class PriceMonitorService {
                 return;
             }
 
-            const admins = await this.database.getAdminsAndModerators();
+            const moderators = await this.database.getModerators();
             
-            if (!admins || admins.length === 0) {
-                console.log('⚠️ Администраторы и модераторы не найдены');
+            if (!moderators || moderators.length === 0) {
+                console.log('⚠️ Модераторы не найдены');
                 return;
             }
 
             const messages = this.formatChangesMessage(changes);
 
-            for (const admin of admins) {
+            for (const moderator of moderators) {
                 try {
                     // Отправляем каждое сообщение отдельно
                     for (const message of messages) {
-                        await this.bot.telegram.sendMessage(admin.user_id, message, { parse_mode: 'HTML' });
-                        // Небольшая пауза между сообщениями
-                        await new Promise(resolve => setTimeout(resolve, 100));
+                        try {
+                            await this.bot.telegram.sendMessage(moderator.user_id, message, { 
+                                parse_mode: 'HTML',
+                                disable_web_page_preview: true
+                            });
+                            // Небольшая пауза между сообщениями
+                            await new Promise(resolve => setTimeout(resolve, 500));
+                        } catch (sendError) {
+                            console.error(`❌ Ошибка отправки сообщения: ${sendError.message}`);
+                            // Продолжаем со следующим сообщением
+                        }
                     }
-                    console.log(`✅ Уведомления отправлены администратору ${admin.user_id}`);
+                    console.log(`✅ Уведомления отправлены модератору ${moderator.user_id}`);
                 } catch (error) {
-                    console.error(`❌ Ошибка отправки уведомления администратору ${admin.user_id}:`, error.message);
+                    console.error(`❌ Ошибка отправки уведомления модератору ${moderator.user_id}:`, error.message);
                 }
             }
 
@@ -275,7 +286,7 @@ class PriceMonitorService {
      * Форматирование сообщения с изменениями (разбивка на части)
      */
     formatChangesMessage(changes) {
-        const MAX_MESSAGE_LENGTH = 4000; // Оставляем запас от лимита в 4096
+        const MAX_MESSAGE_LENGTH = 3800; // Уменьшили для надежности
         const messages = [];
         
         const changesByType = {
@@ -293,22 +304,37 @@ class PriceMonitorService {
 
         // Заголовок
         let currentMessage = `📊 <b>Обнаружены изменения в прайс-листах:</b>\n`;
+        currentMessage += `<b>Всего: ${changes.length} изменений</b>\n\n`;
 
         // Функция для добавления секции
         const addSection = (title, items, formatter) => {
             if (items.length === 0) return;
 
-            let section = `${title}\n`;
-            items.forEach(item => {
-                section += formatter(item);
-            });
-
-            // Если текущее сообщение + секция превышают лимит, начинаем новое
-            if (currentMessage.length + section.length > MAX_MESSAGE_LENGTH) {
+            const sectionTitle = `${title}\n`;
+            
+            // Проверяем, влезет ли заголовок секции в текущее сообщение
+            if (currentMessage.length + sectionTitle.length > MAX_MESSAGE_LENGTH) {
+                // Сохраняем текущее сообщение и начинаем новое
                 messages.push(currentMessage);
-                currentMessage = section;
-            } else {
-                currentMessage += section;
+                currentMessage = `📊 <b>Изменения (продолжение):</b>\n\n`;
+            }
+            
+            // Добавляем заголовок секции
+            currentMessage += sectionTitle;
+            
+            // Обрабатываем все элементы секции
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                const itemText = formatter(item);
+                
+                // Проверяем, влезет ли элемент в текущее сообщение
+                if (currentMessage.length + itemText.length > MAX_MESSAGE_LENGTH) {
+                    // Сохраняем текущее сообщение и начинаем новое
+                    messages.push(currentMessage);
+                    currentMessage = `📊 <b>Изменения (продолжение):</b>\n\n${title} (продолжение)\n`;
+                }
+                
+                currentMessage += itemText;
             }
         };
 
@@ -335,8 +361,19 @@ class PriceMonitorService {
 
         // Добавляем время к последнему сообщению
         currentMessage += `\n🕐 <i>Время проверки: ${new Date().toLocaleString('ru-RU')}</i>`;
-        messages.push(currentMessage);
+        
+        // Проверяем длину перед добавлением
+        if (currentMessage.length > MAX_MESSAGE_LENGTH) {
+            console.log(`⚠️ Последнее сообщение слишком длинное (${currentMessage.length} символов), разбиваем...`);
+            // Если последнее сообщение всё равно слишком длинное, разбиваем его
+            messages.push(currentMessage.substring(0, MAX_MESSAGE_LENGTH));
+            messages.push(currentMessage.substring(MAX_MESSAGE_LENGTH));
+        } else {
+            messages.push(currentMessage);
+        }
 
+        console.log(`📨 Подготовлено ${messages.length} сообщений для отправки`);
+        
         return messages;
     }
 }

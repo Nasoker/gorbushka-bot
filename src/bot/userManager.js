@@ -127,6 +127,36 @@ class UserManager {
     }
 
     /**
+     * Удаление модератора администратором
+     */
+    async removeModerator(adminUserId, targetUserId) {
+        try {
+            // Проверяем, что пользователь, удаляющий модератора, является админом
+            if (!this.isAdmin(adminUserId)) {
+                return { success: false, error: 'Пользователь не является администратором' };
+            }
+
+            // Получаем информацию о целевом пользователе
+            const targetUser = await this.database.getUser(targetUserId);
+            if (!targetUser) {
+                return { success: false, error: 'Пользователь не найден в системе' };
+            }
+
+            if (targetUser.role !== 'moderator') {
+                return { success: false, error: 'Пользователь не является модератором' };
+            }
+
+            // Меняем роль модератора на обычного пользователя
+            await this.database.updateUserRole(targetUserId, 'user');
+
+            return { success: true, user: targetUser };
+        } catch (error) {
+            console.error('❌ Ошибка удаления модератора:', error);
+            return { success: false, error: 'Ошибка при удалении модератора' };
+        }
+    }
+
+    /**
      * Проверка прав доступа пользователя
      */
     async hasAccess(userId) {

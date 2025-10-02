@@ -112,6 +112,7 @@ class TelegramBot {
                 helpText += `
 👑 <b>Админ команды:</b>
 /addModer [ID] - Добавить модератора
+/removeModer [ID] - Удалить модератора
 /users - Список всех пользователей
                 `;
             }
@@ -131,6 +132,7 @@ class TelegramBot {
 
 Доступные команды:
 /addModer [ID] - Добавить модератора
+/removeModer [ID] - Удалить модератора
 /users - Список всех пользователей
                 `, { parse_mode: 'HTML' });
             } else {
@@ -239,6 +241,80 @@ class TelegramBot {
                 
                 await ctx.reply(errorMessage);
                 console.error('Ошибка добавления модератора:', error);
+            }
+        });
+
+        // Команда /removeModer (только для админов)
+        this.bot.command('removeModer', async (ctx) => {
+            if (!ctx.userAccess) return;
+            
+            const userInfo = await this.userManager.getUserInfo(ctx.from.id);
+            if (!userInfo || userInfo.role !== 'admin') {
+                await ctx.reply('🚫 У вас нет прав администратора');
+                return;
+            }
+
+            const messageText = ctx.message.text;
+            const parts = messageText.split(' ');
+            
+            if (parts.length < 2) {
+                await ctx.reply(`
+❌ <b>Неверный формат команды</b>
+
+Использование: /removeModer [ID_пользователя]
+
+Пример: /removeModer 123456789
+                `, { parse_mode: 'HTML' });
+                return;
+            }
+
+            const targetUserId = parseInt(parts[1]);
+            if (isNaN(targetUserId)) {
+                await ctx.reply('❌ ID пользователя должен быть числом');
+                return;
+            }
+
+            try {
+                // Получаем информацию о пользователе
+                const targetUserInfo = await this.userManager.getUserInfo(targetUserId);
+                if (!targetUserInfo) {
+                    await ctx.reply('❌ Пользователь не найден в системе');
+                    return;
+                }
+
+                if (targetUserInfo.role !== 'moderator') {
+                    await ctx.reply('❌ Пользователь не является модератором');
+                    return;
+                }
+
+                // Удаляем модератора (меняем роль на user)
+                const result = await this.userManager.removeModerator(ctx.from.id, targetUserId);
+
+                if (result.success) {
+                    await ctx.reply(`
+✅ <b>Модератор удален!</b>
+
+Пользователь ${targetUserInfo.first_name} больше не является модератором.
+                    `, { parse_mode: 'HTML' });
+
+                    // Уведомляем пользователя
+                    try {
+                        await this.bot.telegram.sendMessage(targetUserId, `
+📢 <b>Уведомление</b>
+
+Ваша роль модератора была отозвана.
+Теперь у вас обычные права пользователя.
+                        `, { parse_mode: 'HTML' });
+                    } catch (sendError) {
+                        console.log('⚠️ Не удалось отправить уведомление пользователю');
+                    }
+                } else {
+                    await ctx.reply(`❌ ${result.error}`);
+                }
+
+            } catch (error) {
+                await ctx.reply('❌ Ошибка при удалении модератора');
+                console.error('Ошибка удаления модератора:', error);
             }
         });
 

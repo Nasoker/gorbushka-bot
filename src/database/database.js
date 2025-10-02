@@ -588,6 +588,24 @@ class Database {
     }
 
     /**
+     * Получение только модераторов
+     */
+    async getModerators() {
+        return new Promise((resolve, reject) => {
+            const sql = 'SELECT * FROM users WHERE role = "moderator"';
+            
+            this.db.all(sql, [], (err, rows) => {
+                if (err) {
+                    console.error('❌ Ошибка получения модераторов:', err.message);
+                    reject(err);
+                } else {
+                    resolve(rows);
+                }
+            });
+        });
+    }
+
+    /**
      * Очистка таблицы изменений цен
      */
     async clearPriceChanges() {
