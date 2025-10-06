@@ -356,7 +356,7 @@ class PriceMonitorService {
         );
 
         addSection('📦 <b>Изменение количества:</b>\n', changesByType.quantity_changed,
-            change => `• ${change.brand_name} - ${change.product_name}${this.getCountryFlag(change.country_abbr)}\n  ${change.old_quantity} → ${change.new_quantity} шт.\n\n`
+            change => `• ${change.brand_name} - ${change.product_name}${this.getCountryFlag(change.country_abbr)}\n  ${change.old_quantity} → ${change.new_quantity} шт. (${change.new_price} руб.)\n\n`
         );
 
         // Добавляем время к последнему сообщению
