@@ -114,6 +114,8 @@ class TelegramBot {
 /addModer [ID] - Добавить модератора
 /removeModer [ID] - Удалить модератора
 /users - Список всех пользователей
+/moderators - Список модераторов с настройками
+/setModerSettings [ID] - Настроить уведомления модератора
                 `;
             }
 
@@ -134,6 +136,8 @@ class TelegramBot {
 /addModer [ID] - Добавить модератора
 /removeModer [ID] - Удалить модератора
 /users - Список всех пользователей
+/moderators - Список модераторов с настройками
+/setModerSettings [ID] - Настроить уведомления модератора
                 `, { parse_mode: 'HTML' });
             } else {
                 await ctx.reply('🚫 У вас нет прав администратора');
@@ -364,6 +368,235 @@ class TelegramBot {
                 await ctx.reply(usersText, { parse_mode: 'HTML' });
             } catch (error) {
                 await ctx.reply('❌ Ошибка получения списка пользователей');
+            }
+        });
+
+        // Команда /moderators (список модераторов с настройками)
+        this.bot.command('moderators', async (ctx) => {
+            if (!ctx.userAccess) return;
+            
+            const userInfo = await this.userManager.getUserInfo(ctx.from.id);
+            if (!userInfo || userInfo.role !== 'admin') {
+                await ctx.reply('🚫 У вас нет прав администратора');
+                return;
+            }
+
+            try {
+                const moderators = await this.userManager.database.getModeratorsWithSettings();
+
+                if (!moderators || moderators.length === 0) {
+                    await ctx.reply('📝 <b>Модераторы не найдены</b>', { parse_mode: 'HTML' });
+                    return;
+                }
+
+                let moderatorsText = `🛡️ <b>Список модераторов с настройками:</b>\n\n`;
+
+                moderators.forEach(mod => {
+                    const appleIcon = mod.receive_apple ? '✅' : '❌';
+                    const nonAppleIcon = mod.receive_non_apple ? '✅' : '❌';
+                    
+                    moderatorsText += `• <b>${mod.first_name || 'Неизвестно'}</b> (ID: ${mod.user_id})\n`;
+                    moderatorsText += `  Apple: ${appleIcon} | Не-Apple: ${nonAppleIcon}\n\n`;
+                });
+
+                moderatorsText += `\n💡 <i>Для изменения настроек используйте:</i>\n`;
+                moderatorsText += `/setModerSettings [ID]`;
+
+                await ctx.reply(moderatorsText, { parse_mode: 'HTML' });
+            } catch (error) {
+                console.error('Ошибка получения модераторов:', error);
+                await ctx.reply('❌ Ошибка получения списка модераторов');
+            }
+        });
+
+        // Команда /setModerSettings (настройка уведомлений модератора)
+        this.bot.command('setModerSettings', async (ctx) => {
+            if (!ctx.userAccess) return;
+            
+            const userInfo = await this.userManager.getUserInfo(ctx.from.id);
+            if (!userInfo || userInfo.role !== 'admin') {
+                await ctx.reply('🚫 У вас нет прав администратора');
+                return;
+            }
+
+            const messageText = ctx.message.text;
+            const parts = messageText.split(' ');
+            
+            if (parts.length < 2) {
+                await ctx.reply(`
+❌ <b>Неверный формат команды</b>
+
+Использование: /setModerSettings [ID_модератора]
+
+Пример: /setModerSettings 123456789
+                `, { parse_mode: 'HTML' });
+                return;
+            }
+
+            const targetUserId = parseInt(parts[1]);
+            if (isNaN(targetUserId)) {
+                await ctx.reply('❌ ID модератора должен быть числом');
+                return;
+            }
+
+            try {
+                // Проверяем, что это действительно модератор
+                const targetUserInfo = await this.userManager.getUserInfo(targetUserId);
+                if (!targetUserInfo) {
+                    await ctx.reply('❌ Пользователь не найден в системе');
+                    return;
+                }
+
+                if (targetUserInfo.role !== 'moderator') {
+                    await ctx.reply('❌ Пользователь не является модератором');
+                    return;
+                }
+
+                // Получаем текущие настройки
+                const settings = await this.userManager.database.getModeratorSettings(targetUserId);
+                
+                const appleIcon = settings && settings.receive_apple ? '✅' : '❌';
+                const nonAppleIcon = settings && settings.receive_non_apple ? '✅' : '❌';
+
+                // Отправляем меню с кнопками
+                const keyboard = {
+                    inline_keyboard: [
+                        [
+                            { text: `${appleIcon} Apple`, callback_data: `toggle_apple_${targetUserId}` },
+                            { text: `${nonAppleIcon} Не-Apple`, callback_data: `toggle_non_apple_${targetUserId}` }
+                        ],
+                        [
+                            { text: '🔙 Закрыть', callback_data: 'close_settings' }
+                        ]
+                    ]
+                };
+
+                await ctx.reply(`
+⚙️ <b>Настройки уведомлений для модератора</b>
+
+<b>Модератор:</b> ${targetUserInfo.first_name || 'Неизвестно'} (ID: ${targetUserId})
+
+<b>Текущие настройки:</b>
+• Apple устройства: ${appleIcon}
+• Не-Apple устройства: ${nonAppleIcon}
+
+Выберите тип уведомлений:
+                `, { 
+                    parse_mode: 'HTML',
+                    reply_markup: keyboard
+                });
+
+            } catch (error) {
+                console.error('Ошибка настройки модератора:', error);
+                await ctx.reply('❌ Ошибка при получении настроек модератора');
+            }
+        });
+
+        // Обработчик callback кнопок для настроек модераторов
+        this.bot.on('callback_query', async (ctx) => {
+            const callbackData = ctx.callbackQuery.data;
+            
+            // Проверка прав администратора
+            const userInfo = await this.userManager.getUserInfo(ctx.from.id);
+            if (!userInfo || userInfo.role !== 'admin') {
+                await ctx.answerCbQuery('🚫 У вас нет прав администратора');
+                return;
+            }
+
+            try {
+                // Закрыть меню
+                if (callbackData === 'close_settings') {
+                    await ctx.deleteMessage();
+                    await ctx.answerCbQuery('✅ Меню закрыто');
+                    return;
+                }
+
+                // Парсим callback data
+                const parts = callbackData.split('_');
+                const action = parts[0];
+                const targetUserId = parseInt(parts[parts.length - 1]);
+
+                if (isNaN(targetUserId)) {
+                    await ctx.answerCbQuery('❌ Ошибка: неверный ID');
+                    return;
+                }
+
+                // Получаем текущие настройки
+                let settings = await this.userManager.database.getModeratorSettings(targetUserId);
+                if (!settings) {
+                    // Если настроек нет, создаем их
+                    await this.userManager.database.createModeratorSettings(targetUserId);
+                    settings = await this.userManager.database.getModeratorSettings(targetUserId);
+                }
+
+                let receiveApple = settings.receive_apple === 1;
+                let receiveNonApple = settings.receive_non_apple === 1;
+
+                // Выполняем действие
+                if (action === 'toggle') {
+                    const type = parts[1]; // apple или non
+                    if (type === 'apple') {
+                        // Проверяем, можно ли выключить Apple
+                        if (receiveApple && !receiveNonApple) {
+                            // Нельзя выключить - это единственная включенная кнопка
+                            await ctx.answerCbQuery('⚠️ Хотя бы один из вариантов должен быть выбран!', { show_alert: true });
+                            return;
+                        }
+                        receiveApple = !receiveApple;
+                    } else if (parts.slice(1, 3).join('_') === 'non_apple') {
+                        // Проверяем, можно ли выключить Не-Apple
+                        if (receiveNonApple && !receiveApple) {
+                            // Нельзя выключить - это единственная включенная кнопка
+                            await ctx.answerCbQuery('⚠️ Хотя бы один из вариантов должен быть выбран!', { show_alert: true });
+                            return;
+                        }
+                        receiveNonApple = !receiveNonApple;
+                    }
+                }
+
+                // Обновляем настройки в базе
+                await this.userManager.database.updateModeratorSettings(targetUserId, receiveApple, receiveNonApple);
+
+                // Получаем информацию о модераторе
+                const targetUserInfo = await this.userManager.getUserInfo(targetUserId);
+
+                // Обновляем кнопки
+                const appleIcon = receiveApple ? '✅' : '❌';
+                const nonAppleIcon = receiveNonApple ? '✅' : '❌';
+
+                const keyboard = {
+                    inline_keyboard: [
+                        [
+                            { text: `${appleIcon} Apple`, callback_data: `toggle_apple_${targetUserId}` },
+                            { text: `${nonAppleIcon} Не-Apple`, callback_data: `toggle_non_apple_${targetUserId}` }
+                        ],
+                        [
+                            { text: '🔙 Закрыть', callback_data: 'close_settings' }
+                        ]
+                    ]
+                };
+
+                // Обновляем сообщение
+                await ctx.editMessageText(`
+⚙️ <b>Настройки уведомлений для модератора</b>
+
+<b>Модератор:</b> ${targetUserInfo.first_name || 'Неизвестно'} (ID: ${targetUserId})
+
+<b>Текущие настройки:</b>
+• Apple устройства: ${appleIcon}
+• Не-Apple устройства: ${nonAppleIcon}
+
+Выберите тип уведомлений:
+                `, {
+                    parse_mode: 'HTML',
+                    reply_markup: keyboard
+                });
+
+                await ctx.answerCbQuery('✅ Настройки обновлены');
+
+            } catch (error) {
+                console.error('Ошибка обработки callback:', error);
+                await ctx.answerCbQuery('❌ Ошибка при обновлении настроек');
             }
         });
 

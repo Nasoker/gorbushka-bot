@@ -99,6 +99,18 @@ class Database {
                 )
             `;
 
+            const createModeratorSettingsTable = `
+                CREATE TABLE IF NOT EXISTS moderator_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE NOT NULL,
+                    receive_apple INTEGER DEFAULT 1 CHECK (receive_apple IN (0, 1)),
+                    receive_non_apple INTEGER DEFAULT 1 CHECK (receive_non_apple IN (0, 1)),
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+            `;
+
             this.db.run(createUsersTable, (err) => {
                 if (err) {
                     console.error('❌ Ошибка создания таблицы users:', err.message);
@@ -129,7 +141,15 @@ class Database {
                                                     console.error('❌ Ошибка создания таблицы price_changes:', err.message);
                                                     reject(err);
                                                 } else {
-                            resolve();
+                                                    // Создаем таблицу настроек модераторов
+                                                    this.db.run(createModeratorSettingsTable, (err) => {
+                                                        if (err) {
+                                                            console.error('❌ Ошибка создания таблицы moderator_settings:', err.message);
+                                                            reject(err);
+                                                        } else {
+                                                            resolve();
+                                                        }
+                                                    });
                                                 }
                                             });
                                         }
@@ -186,21 +206,49 @@ class Database {
      * Обновление роли пользователя
      */
     async updateUserRole(userId, newRole) {
-        return new Promise((resolve, reject) => {
-            const sql = `
-                UPDATE users 
-                SET role = ?, updated_at = CURRENT_TIMESTAMP 
-                WHERE user_id = ?
-            `;
-            
-            this.db.run(sql, [newRole, userId], function(err) {
-                if (err) {
-                    console.error('❌ Ошибка обновления роли:', err.message);
-                    reject(err);
-                } else {
-                    resolve({ changes: this.changes });
-                }
-            });
+        return new Promise(async (resolve, reject) => {
+            try {
+                // Получаем текущую роль пользователя
+                const currentUser = await this.getUser(userId);
+                
+                const sql = `
+                    UPDATE users 
+                    SET role = ?, updated_at = CURRENT_TIMESTAMP 
+                    WHERE user_id = ?
+                `;
+                
+                this.db.run(sql, [newRole, userId], async (err) => {
+                    if (err) {
+                        console.error('❌ Ошибка обновления роли:', err.message);
+                        reject(err);
+                    } else {
+                        // Если назначаем модератора - создаем настройки
+                        if (newRole === 'moderator') {
+                            try {
+                                await this.createModeratorSettings(userId);
+                                console.log('✅ Созданы настройки для нового модератора');
+                            } catch (err) {
+                                console.log('ℹ️ Настройки модератора уже существуют');
+                            }
+                        }
+                        
+                        // Если убираем роль модератора - удаляем настройки
+                        if (currentUser && currentUser.role === 'moderator' && newRole !== 'moderator') {
+                            try {
+                                await this.deleteModeratorSettings(userId);
+                                console.log('✅ Удалены настройки модератора');
+                            } catch (err) {
+                                console.error('❌ Ошибка удаления настроек модератора:', err.message);
+                            }
+                        }
+                        
+                        resolve({ changes: 1 });
+                    }
+                });
+            } catch (err) {
+                console.error('❌ Ошибка при обновлении роли пользователя:', err.message);
+                reject(err);
+            }
         });
     }
 
@@ -633,6 +681,182 @@ class Database {
             this.db.run(sql, [], function(err) {
                 if (err) {
                     console.error('❌ Ошибка очистки старых изменений:', err.message);
+                    reject(err);
+                } else {
+                    resolve({ changes: this.changes });
+                }
+            });
+        });
+    }
+
+    /**
+     * Создание начальных настроек для модератора (вся информация включена)
+     */
+    async createModeratorSettings(userId) {
+        return new Promise((resolve, reject) => {
+            const sql = `
+                INSERT OR IGNORE INTO moderator_settings (user_id, receive_apple, receive_non_apple)
+                VALUES (?, 1, 1)
+            `;
+            
+            this.db.run(sql, [userId], function(err) {
+                if (err) {
+                    console.error('❌ Ошибка создания настроек модератора:', err.message);
+                    reject(err);
+                } else {
+                    resolve({ id: this.lastID, changes: this.changes });
+                }
+            });
+        });
+    }
+
+    /**
+     * Получение настроек модератора
+     */
+    async getModeratorSettings(userId) {
+        return new Promise((resolve, reject) => {
+            const sql = 'SELECT * FROM moderator_settings WHERE user_id = ?';
+            
+            this.db.get(sql, [userId], (err, row) => {
+                if (err) {
+                    console.error('❌ Ошибка получения настроек модератора:', err.message);
+                    reject(err);
+                } else {
+                    resolve(row);
+                }
+            });
+        });
+    }
+
+    /**
+     * Обновление настроек модератора
+     */
+    async updateModeratorSettings(userId, receiveApple, receiveNonApple) {
+        return new Promise((resolve, reject) => {
+            const sql = `
+                UPDATE moderator_settings 
+                SET receive_apple = ?, receive_non_apple = ?, updated_at = CURRENT_TIMESTAMP 
+                WHERE user_id = ?
+            `;
+            
+            this.db.run(sql, [receiveApple ? 1 : 0, receiveNonApple ? 1 : 0, userId], function(err) {
+                if (err) {
+                    console.error('❌ Ошибка обновления настроек модератора:', err.message);
+                    reject(err);
+                } else {
+                    resolve({ changes: this.changes });
+                }
+            });
+        });
+    }
+
+    /**
+     * Проверка, может ли модератор получать информацию об устройствах Apple
+     */
+    async canReceiveAppleNotifications(userId) {
+        return new Promise(async (resolve, reject) => {
+            try {
+                const settings = await this.getModeratorSettings(userId);
+                resolve(settings ? settings.receive_apple === 1 : false);
+            } catch (err) {
+                reject(err);
+            }
+        });
+    }
+
+    /**
+     * Проверка, может ли модератор получать информацию о не-Apple устройствах
+     */
+    async canReceiveNonAppleNotifications(userId) {
+        return new Promise(async (resolve, reject) => {
+            try {
+                const settings = await this.getModeratorSettings(userId);
+                resolve(settings ? settings.receive_non_apple === 1 : false);
+            } catch (err) {
+                reject(err);
+            }
+        });
+    }
+
+    /**
+     * Получение модераторов, которые должны получать уведомления об устройствах Apple
+     */
+    async getModeratorsForApple() {
+        return new Promise((resolve, reject) => {
+            const sql = `
+                SELECT u.* FROM users u
+                INNER JOIN moderator_settings ms ON u.user_id = ms.user_id
+                WHERE u.role = 'moderator' AND ms.receive_apple = 1
+            `;
+            
+            this.db.all(sql, [], (err, rows) => {
+                if (err) {
+                    console.error('❌ Ошибка получения модераторов для Apple:', err.message);
+                    reject(err);
+                } else {
+                    resolve(rows);
+                }
+            });
+        });
+    }
+
+    /**
+     * Получение модераторов, которые должны получать уведомления о не-Apple устройствах
+     */
+    async getModeratorsForNonApple() {
+        return new Promise((resolve, reject) => {
+            const sql = `
+                SELECT u.* FROM users u
+                INNER JOIN moderator_settings ms ON u.user_id = ms.user_id
+                WHERE u.role = 'moderator' AND ms.receive_non_apple = 1
+            `;
+            
+            this.db.all(sql, [], (err, rows) => {
+                if (err) {
+                    console.error('❌ Ошибка получения модераторов для не-Apple:', err.message);
+                    reject(err);
+                } else {
+                    resolve(rows);
+                }
+            });
+        });
+    }
+
+    /**
+     * Получение всех модераторов с их настройками
+     */
+    async getModeratorsWithSettings() {
+        return new Promise((resolve, reject) => {
+            const sql = `
+                SELECT u.*, 
+                       COALESCE(ms.receive_apple, 1) as receive_apple,
+                       COALESCE(ms.receive_non_apple, 1) as receive_non_apple
+                FROM users u
+                LEFT JOIN moderator_settings ms ON u.user_id = ms.user_id
+                WHERE u.role = 'moderator'
+            `;
+            
+            this.db.all(sql, [], (err, rows) => {
+                if (err) {
+                    console.error('❌ Ошибка получения модераторов с настройками:', err.message);
+                    reject(err);
+                } else {
+                    resolve(rows);
+                }
+            });
+        });
+    }
+
+    /**
+     * Удаление настроек модератора (при понижении роли)
+     */
+    async deleteModeratorSettings(userId) {
+        return new Promise((resolve, reject) => {
+            const sql = 'DELETE FROM moderator_settings WHERE user_id = ?';
+            
+            this.db.run(sql, [userId], function(err) {
+                if (err) {
+                    console.error('❌ Ошибка удаления настроек модератора:', err.message);
                     reject(err);
                 } else {
                     resolve({ changes: this.changes });

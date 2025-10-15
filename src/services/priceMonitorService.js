@@ -26,7 +26,7 @@ class PriceMonitorService {
 
         this.intervalId = setInterval(() => {
             this.checkForChanges();
-        }, 60 * 5 * 1000);
+        }, 60 * 3 * 1000);
     }
 
     /**
@@ -223,7 +223,7 @@ class PriceMonitorService {
     }
 
     /**
-     * Отправка уведомлений только модераторам
+     * Отправка уведомлений только модераторам с учетом их настроек
      */
     async sendNotifications(changes) {
         try {
@@ -232,18 +232,53 @@ class PriceMonitorService {
                 return;
             }
 
-            const moderators = await this.database.getModerators();
+            const moderators = await this.database.getModeratorsWithSettings();
             
             if (!moderators || moderators.length === 0) {
                 console.log('⚠️ Модераторы не найдены');
                 return;
             }
 
-            const messages = this.formatChangesMessage(changes);
+            // Разделяем изменения на Apple и не-Apple
+            const appleChanges = [];
+            const nonAppleChanges = [];
 
+            changes.forEach(change => {
+                if (this.isAppleDevice(change.product_name, change.brand_name)) {
+                    appleChanges.push(change);
+                } else {
+                    nonAppleChanges.push(change);
+                }
+            });
+
+            // Отправляем уведомления каждому модератору
             for (const moderator of moderators) {
                 try {
-                    // Отправляем каждое сообщение отдельно
+                    const receiveApple = moderator.receive_apple === 1;
+                    const receiveNonApple = moderator.receive_non_apple === 1;
+
+                    // Формируем список изменений для этого модератора
+                    const moderatorChanges = [];
+                    
+                    // Если модератор получает Apple уведомления - добавляем Apple изменения
+                    if (receiveApple) {
+                        moderatorChanges.push(...appleChanges);
+                    }
+                    
+                    // Если модератор получает не-Apple уведомления - добавляем не-Apple изменения
+                    if (receiveNonApple) {
+                        moderatorChanges.push(...nonAppleChanges);
+                    }
+
+                    // Если у модератора нет изменений для отправки, пропускаем
+                    if (moderatorChanges.length === 0) {
+                        console.log(`⏭️ Модератор ${moderator.user_id} - нет изменений для отправки`);
+                        continue;
+                    }
+
+                    // Форматируем и отправляем сообщения
+                    const messages = this.formatChangesMessage(moderatorChanges);
+
                     for (const message of messages) {
                         try {
                             await this.bot.telegram.sendMessage(moderator.user_id, message, { 
@@ -257,7 +292,9 @@ class PriceMonitorService {
                             // Продолжаем со следующим сообщением
                         }
                     }
-                    console.log(`✅ Уведомления отправлены модератору ${moderator.user_id}`);
+                    
+                    console.log(`✅ Уведомления отправлены модератору ${moderator.user_id} (Apple:${receiveApple?'✅':'❌'}, Не-Apple:${receiveNonApple?'✅':'❌'}, всего: ${moderatorChanges.length} изм.)`);
+                    
                 } catch (error) {
                     console.error(`❌ Ошибка отправки уведомления модератору ${moderator.user_id}:`, error.message);
                 }
@@ -280,6 +317,32 @@ class PriceMonitorService {
             .map(char => 127397 + char.charCodeAt(0));
         
         return ' ' + String.fromCodePoint(...codePoints);
+    }
+
+    /**
+     * Проверка, является ли устройство Apple
+     */
+    isAppleDevice(productName, brandName) {
+        if (!productName && !brandName) return false;
+        
+        const searchText = `${brandName || ''} ${productName || ''}`.toLowerCase();
+        
+        // Список ключевых слов для Apple устройств
+        const appleKeywords = [
+            'iphone',
+            'ipad',
+            'macbook',
+            'mac ',
+            'apple watch',
+            'airpods',
+            'apple',
+            'imac',
+            'mac mini',
+            'mac pro',
+            'mac studio'
+        ];
+        
+        return appleKeywords.some(keyword => searchText.includes(keyword));
     }
 
     /**
@@ -371,8 +434,6 @@ class PriceMonitorService {
         } else {
             messages.push(currentMessage);
         }
-
-        console.log(`📨 Подготовлено ${messages.length} сообщений для отправки`);
         
         return messages;
     }
