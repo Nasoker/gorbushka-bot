@@ -1,5 +1,6 @@
 const { Telegraf, Composer } = require('telegraf');
 const UserManager = require('./userManager');
+const AnsweringBotController = require('./answeringBotController');
 
 /**
  * Основной класс Telegram бота
@@ -8,6 +9,7 @@ class TelegramBot {
     constructor(token, database = null) {
         this.bot = new Telegraf(token);
         this.userManager = new UserManager(database);
+        this.answeringController = null;
         this.isInitialized = false;
     }
 
@@ -19,9 +21,19 @@ class TelegramBot {
             // Инициализируем менеджер пользователей
             await this.userManager.init();
             
+            // Инициализируем контроллер управления answering-bot
+            this.answeringController = new AnsweringBotController(this.bot, this.userManager);
+            await this.answeringController.init();
+            
             // Настраиваем middleware и обработчики
             this.setupMiddleware();
             this.setupHandlers();
+            
+            // Регистрируем команды управления answering-bot
+            this.answeringController.registerCommands();
+            
+            // Регистрируем обработчик текста ПОСЛЕДНИМ (после всех команд)
+            this.setupTextHandler();
             
             this.isInitialized = true;
         } catch (error) {
@@ -55,7 +67,7 @@ class TelegramBot {
                 const hasAccess = await this.userManager.handleNewUser(ctx);
                 
                 // Если у пользователя нет доступа, игнорируем сообщения
-                if (!hasAccess && ctx.message) return
+                if (!hasAccess && ctx.message) return;
 
                 // Сохраняем информацию о доступе в контексте
                 ctx.userAccess = hasAccess;
@@ -64,6 +76,34 @@ class TelegramBot {
             } catch (error) {
                 console.error('❌ Ошибка в middleware:', error);
             }
+        });
+    }
+
+    /**
+     * Настройка обработчика текстовых сообщений
+     * Регистрируется ПОСЛЕДНИМ, чтобы не перехватывать команды
+     */
+    setupTextHandler() {
+        this.bot.on('text', async (ctx) => {
+            // Пропускаем, если нет доступа
+            if (!ctx.userAccess) return;
+            
+            // Игнорируем команды - они обрабатываются специфическими обработчиками
+            if (ctx.message.text.startsWith('/')) {
+                return;
+            }
+            
+            const userInfo = await this.userManager.getUserInfo(ctx.from.id);
+            const role = userInfo ? userInfo.role : 'unknown';
+            
+            await ctx.reply(`
+👋 Привет, ${ctx.from.first_name}!
+
+Ваша роль: ${this.userManager.getRoleEmoji(role)} ${role}
+Время: ${new Date().toLocaleString('ru-RU')}
+
+Используйте /help для списка команд.
+            `);
         });
     }
 
@@ -77,13 +117,23 @@ class TelegramBot {
             const hasAccess = ctx.userAccess;
             
             if (hasAccess) {
-                await ctx.reply(`
+                const userInfo = await this.userManager.getUserInfo(userId);
+                const isAdmin = userInfo && userInfo.role === 'admin';
+                
+                let welcomeText = `
 🤖 <b>Добро пожаловать в бота!</b>
 
 Вы имеете доступ к боту. Доступные команды:
-/admin - Админ панель
 /help - Помощь
-                `, { parse_mode: 'HTML' });
+                `;
+                
+                if (isAdmin) {
+                    welcomeText += `/admin - Админ панель
+/answering - 🎛️ Управление Answering-Bot
+                    `;
+                }
+                
+                await ctx.reply(welcomeText, { parse_mode: 'HTML' });
             } else {
                 await ctx.reply(`
 🚫 <b>Доступ ограничен</b>
@@ -116,6 +166,7 @@ class TelegramBot {
 /users - Список всех пользователей
 /moderators - Список модераторов с настройками
 /setModerSettings [ID] - Настроить уведомления модератора
+/answering - 🎛️ Управление Answering-Bot
                 `;
             }
 
@@ -132,12 +183,15 @@ class TelegramBot {
                 await ctx.reply(`
 👑 <b>Админ панель</b>
 
-Доступные команды:
+<b>Управление пользователями:</b>
 /addModer [ID] - Добавить модератора
 /removeModer [ID] - Удалить модератора
 /users - Список всех пользователей
 /moderators - Список модераторов с настройками
 /setModerSettings [ID] - Настроить уведомления модератора
+
+<b>Управление Answering-Bot:</b>
+/answering - 🎛️ Меню управления
                 `, { parse_mode: 'HTML' });
             } else {
                 await ctx.reply('🚫 У вас нет прав администратора');
@@ -492,8 +546,14 @@ class TelegramBot {
             }
         });
 
-        // Обработчик callback кнопок для настроек модераторов
-        this.bot.on('callback_query', async (ctx) => {
+        // Обработчик кнопки "Закрыть" для настроек модераторов
+        this.bot.action('close_settings', async (ctx) => {
+            await ctx.deleteMessage();
+            await ctx.answerCbQuery('✅ Меню закрыто');
+        });
+
+        // Обработчик кнопок переключения настроек модераторов
+        this.bot.action(/^toggle_(apple|non_apple)_\d+$/, async (ctx) => {
             const callbackData = ctx.callbackQuery.data;
             
             // Проверка прав администратора
@@ -504,12 +564,6 @@ class TelegramBot {
             }
 
             try {
-                // Закрыть меню
-                if (callbackData === 'close_settings') {
-                    await ctx.deleteMessage();
-                    await ctx.answerCbQuery('✅ Меню закрыто');
-                    return;
-                }
 
                 // Парсим callback data
                 const parts = callbackData.split('_');
@@ -600,22 +654,6 @@ class TelegramBot {
             }
         });
 
-        // Обработчик текстовых сообщений (только для пользователей с доступом)
-        this.bot.on('text', async (ctx) => {
-            if (!ctx.userAccess) return;
-            
-            const userInfo = await this.userManager.getUserInfo(ctx.from.id);
-            const role = userInfo ? userInfo.role : 'unknown';
-            
-            await ctx.reply(`
-👋 Привет, ${ctx.from.first_name}!
-
-Ваша роль: ${this.userManager.getRoleEmoji(role)} ${role}
-Время: ${new Date().toLocaleString('ru-RU')}
-
-Используйте /help для списка команд.
-            `);
-        });
 
         // Обработчик ошибок
         this.bot.catch((err, ctx) => {
