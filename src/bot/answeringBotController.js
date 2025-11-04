@@ -166,7 +166,7 @@ class AnsweringBotController {
 ${statusIcon} Обработка сообщений: <b>${statusText}</b>
 
 <b>Последнее изменение:</b>
-🕐 ${new Date(state.lastChanged).toLocaleString('ru-RU')}
+🕐 ${new Date(state.lastChanged).toLocaleString('ru-RU', { timeZone: 'Europe/Minsk' })}
 
 Используйте кнопки ниже для управления:
             `.trim();
